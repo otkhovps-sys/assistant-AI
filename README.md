@@ -42,7 +42,7 @@ App mở một cửa sổ nhỏ có hình cầu ở giữa. Nói vào micro, ho�
 
 Cửa sổ nhỏ này nằm ở góc dưới phải màn hình và luôn nổi trên các ứng dụng khác; nút ghim ở góc trên phải (hoặc cờ `-no-top`) tắt việc đó. Khi trợ lý đang làm một yêu cầu, hình cầu chuyển tím và nút gửi đổi thành nút Dừng.
 
-Cửa sổ là Microsoft Edge ở chế độ app (có sẵn trên Windows 10/11), hiển thị một trang do app phục vụ trên `127.0.0.1`. Nếu máy không có Edge, trang mở bằng trình duyệt mặc định.
+Cửa sổ là Microsoft Edge (hoặc Chrome nếu không có Edge) ở chế độ app, hiển thị một trang do app phục vụ trên `127.0.0.1`. Trình duyệt chạy với hồ sơ riêng của trợ lý, lưu ở `%LocalAppData%\assistant-AI\browser`, nên cửa sổ không gộp vào các tab bạn đang mở. Nếu máy không có cả hai, trang mở bằng trình duyệt mặc định.
 
 | Cờ | Ý nghĩa |
 |---|---|
