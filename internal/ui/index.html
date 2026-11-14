@@ -43,10 +43,17 @@
   #mic[aria-pressed="true"] { background: #3a1a1e; border-color: #7a2f36; color: #ff8a8a; }
   #mic .off { display: none; }
   #mic[aria-pressed="true"] .off { display: block; }
+  #start {
+    position: fixed; inset: 0; z-index: 2; display: none; place-items: center; cursor: pointer;
+    background: rgba(11, 13, 18, .82); color: var(--fg); border: 0; border-radius: 0; width: 100%; height: 100%;
+    font: inherit; font-size: 16px;
+  }
+  #start.on { display: grid; }
   svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 </style>
 </head>
 <body>
+<button id="start" type="button">Bấm để bắt đầu trò chuyện</button>
 <div id="stage">
   <canvas id="orb" aria-hidden="true"></canvas>
   <div id="status" role="status">Đang kết nối…</div>
@@ -68,7 +75,7 @@
 <script>
 const token = new URLSearchParams(location.search).get('t') || '';
 const $ = id => document.getElementById(id);
-const st = { conn: 'connecting', msg: '', muted: false, speaking: false, mic: 0, out: 0, live: false };
+const st = { conn: 'connecting', msg: '', muted: false, speaking: false, mic: 0, out: 0, live: false, hint: '' };
 
 function post(path, body) {
   return fetch(path + '?t=' + token, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -78,9 +85,9 @@ function post(path, body) {
 let lastWho = '', toastTimer;
 function onEvent(e) {
   switch (e.type) {
-    case 'level': st.mic = e.mic; st.out = e.out; st.speaking = e.speaking; break;
-    case 'status': st.conn = e.state; st.msg = e.message || ''; break;
-    case 'muted': st.muted = e.muted; $('mic').setAttribute('aria-pressed', e.muted);
+    case 'level': if (!speech) { st.mic = e.mic; st.out = e.out; st.speaking = e.speaking; } break; // chế độ trình duyệt tự đo
+    case 'status': st.conn = e.state; st.msg = e.message || ''; if (speech) speech.sync(); break;
+    case 'muted': st.muted = e.muted; if (speech) speech.sync(); $('mic').setAttribute('aria-pressed', e.muted);
       $('mic').setAttribute('aria-label', e.muted ? 'Bật micro' : 'Tắt micro'); break;
     case 'text': {
       const el = e.who === 'user' ? $('you') : $('aiText');
@@ -89,7 +96,12 @@ function onEvent(e) {
       el.textContent += e.text;
       break;
     }
-    case 'turn': lastWho = ''; break;
+    case 'turn': if (speech) speech.say($('aiText').textContent); lastWho = ''; break;
+    case 'config': if (e.speech === 'browser' && !speech) speech = browserSpeech(); break;
+    case 'error':
+      $('toast').textContent = e.message; $('toast').className = 'on fail';
+      clearTimeout(toastTimer); toastTimer = setTimeout(() => $('toast').className = '', 8000);
+      break;
     case 'tool':
       $('toast').textContent = (e.ok ? 'Đã chạy: ' : 'Lỗi khi chạy: ') + e.name;
       $('toast').className = 'on' + (e.ok ? '' : ' fail');
@@ -104,6 +116,79 @@ function connect() {
   es.onerror = () => { st.live = false; };
 }
 connect();
+
+// ---- Giọng nói bằng trình duyệt ----
+// Dùng khi máy chủ AI chỉ trao đổi bằng chữ: trình duyệt nhận giọng nói thành chữ và đọc câu trả lời.
+let speech = null;
+function browserSpeech() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const synth = window.speechSynthesis;
+  let rec = null, running = false, started = false, talking = false;
+
+  // Chỉ nghe khi đã bắt đầu, micro bật và trợ lý không đang đọc (để nó không nghe lại chính mình).
+  const wantListen = () => started && !st.muted && !talking && st.conn === 'ready';
+  function sync() {
+    if (!rec) return;
+    if (wantListen() && !running) { try { rec.start(); running = true; } catch (_) {} }
+    if (!wantListen() && running) rec.abort();
+  }
+  if (SR) {
+    rec = new SR();
+    rec.lang = 'vi-VN'; rec.continuous = true; rec.interimResults = true;
+    rec.onresult = ev => {
+      let interim = '';
+      for (let i = ev.resultIndex; i < ev.results.length; i++) {
+        const r = ev.results[i], text = r[0].transcript.trim();
+        if (!r.isFinal) interim += text + ' ';
+        else if (text) post('/send', { text });
+      }
+      if (interim) { $('you').textContent = interim; lastWho = ''; }
+    };
+    rec.onerror = ev => {
+      if (ev.error === 'not-allowed' || ev.error === 'service-not-allowed') {
+        started = false; st.hint = 'Chưa được cấp quyền micro. Bạn vẫn gõ lệnh được.';
+      } else if (ev.error === 'network') st.hint = 'Không kết nối được dịch vụ nhận giọng nói.';
+    };
+    rec.onend = () => { running = false; setTimeout(sync, 300); };
+  } else {
+    st.hint = 'Trình duyệt này không nhận được giọng nói. Hãy gõ lệnh.';
+  }
+
+  // Mức micro cho hình cầu.
+  async function meter() {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const ac = new AudioContext(), an = ac.createAnalyser(), buf = new Float32Array(1024);
+      an.fftSize = 1024; ac.createMediaStreamSource(stream).connect(an);
+      setInterval(() => {
+        an.getFloatTimeDomainData(buf);
+        let sum = 0; for (const v of buf) sum += v * v;
+        st.mic = Math.sqrt(sum / buf.length);
+      }, 50);
+    } catch (_) {}
+  }
+
+  function say(text) {
+    text = text.trim();
+    if (!synth || !text) return;
+    const u = new SpeechSynthesisUtterance(text);
+    const vi = /[ăâđêôơưàáạảãèéẹẻẽìíịỉĩòóọỏõùúụủũỳýỵỷỹ]/i.test(text);
+    const voices = synth.getVoices().filter(v => v.lang.toLowerCase().startsWith(vi ? 'vi' : 'en'));
+    const voice = voices.find(v => /natural|online/i.test(v.name)) || voices[0];
+    if (voice) { u.voice = voice; u.lang = voice.lang; } else u.lang = vi ? 'vi-VN' : 'en-US';
+    const done = () => { talking = false; st.speaking = false; sync(); };
+    u.onstart = () => { talking = true; st.speaking = true; sync(); };
+    u.onend = done; u.onerror = done;
+    synth.cancel(); synth.speak(u);
+  }
+  // Trình duyệt không cho biết âm lượng giọng đọc, nên hình cầu gợn theo nhịp giả khi đang đọc.
+  setInterval(() => { if (talking) st.out = 0.05 + 0.05 * Math.abs(Math.sin(performance.now() / 110)) + 0.03 * Math.random(); }, 50);
+
+  // Trình duyệt chỉ cho đọc thành tiếng sau khi người dùng bấm vào trang một lần.
+  $('start').className = 'on';
+  $('start').onclick = () => { $('start').className = ''; started = true; if (synth) synth.getVoices(); meter(); sync(); };
+  return { say, sync };
+}
 
 // ---- Điều khiển ----
 $('mic').onclick = () => post('/mute', { muted: !st.muted });
@@ -143,7 +228,7 @@ function draw(ms) {
   cx.clearRect(0, 0, w, h);
 
   const m = mode(), M = MODES[m];
-  const label = (m === 'error' && st.msg) ? st.msg : (m === 'connecting' && st.msg) ? st.msg : M.label;
+  const label = (m === 'error' || m === 'connecting') && st.msg ? st.msg : m === 'listening' && st.hint ? st.hint : M.label;
   if (label !== shown) { shown = label; $('status').textContent = label; $('status').className = m === 'error' ? 'error' : ''; }
 
   // Tiếng nói thường có RMS nhỏ, nên kéo giãn để hình cầu phản ứng rõ.

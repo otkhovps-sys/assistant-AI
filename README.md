@@ -16,6 +16,17 @@ go build -ldflags "-H=windowsgui" -o assistant.exe ./cmd/assistant
 
 Lấy API key tại <https://aistudio.google.com/apikey>, chép `.env.example` thành `.env` và điền `GEMINI_API_KEY`.
 
+## Hai cách kết nối AI
+
+| | Gemini Live | API tương thích OpenAI |
+|---|---|---|
+| Bật bằng | `GEMINI_API_KEY` | `OPENAI_BASE_URL`, `OPENAI_API_KEY`, `OPENAI_MODEL` |
+| Nghe và đọc | Gemini xử lý, thời gian thực, ngắt lời được | Cửa sổ Edge nhận giọng nói thành chữ và đọc câu trả lời |
+| Tra Google | Có sẵn trong Gemini | Mở trang kết quả Google bằng trình duyệt |
+| Độ trễ | Thấp | Vài giây mỗi câu |
+
+Ở cách thứ hai, app chỉ gửi và nhận chữ qua `/chat/completions` kèm gọi hàm, nên dùng được với mọi máy chủ tương thích OpenAI có hỗ trợ tools. Lần đầu mở cần bấm vào cửa sổ một lần và cho phép dùng micro. Nhận giọng nói cần Edge hoặc Chrome; chế độ `-cli` ở cách này chỉ gõ chữ.
+
 ## Chạy
 
 ```bash
@@ -37,7 +48,8 @@ Cửa sổ là Microsoft Edge ở chế độ app (có sẵn trên Windows 10/11
 | `-text` | Chỉ gõ chữ, không dùng micro và loa |
 | `-full-duplex` | Giữ micro mở khi trợ lý đang nói để ngắt lời được. Nên dùng tai nghe, nếu không trợ lý sẽ nghe lại chính nó |
 | `-allow-power` | Cho phép tắt máy và khởi động lại |
-| `-model` | Model Live, mặc định `gemini-3.8-live` (hoặc biến `GEMINI_MODEL`) |
+| `-base-url` | Địa chỉ API tương thích OpenAI (hoặc biến `OPENAI_BASE_URL`) |
+| `-model` | Tên model (hoặc biến `OPENAI_MODEL` / `GEMINI_MODEL`, mặc định `gemini-3.8-live`) |
 | `-voice` | Tên giọng đọc (hoặc biến `GEMINI_VOICE`) |
 
 ## Trợ lý làm được gì
@@ -63,6 +75,7 @@ Giới hạn an toàn: trợ lý không chạy được lệnh tuỳ ý, không 
 cmd/assistant        điểm vào, đọc cờ và .env
 internal/ui          giao diện hình cầu: máy chủ web cục bộ và trang index.html
 internal/assistant   phiên Gemini Live: gửi âm thanh/chữ, nhận trả lời, gọi hàm, tự kết nối lại
+internal/chat        chế độ API tương thích OpenAI: chat completions, gọi hàm
 internal/audio       thu micro 16 kHz, phát loa 24 kHz
 internal/tools       các hàm AI được gọi; platform_windows.go chứa phần điều khiển Windows
 ```

@@ -35,14 +35,17 @@ type Server struct {
 
 	mu        sync.Mutex
 	clients   map[chan []byte]struct{}
-	status    []byte // sự kiện trạng thái gần nhất, gửi lại cho cửa sổ mới mở
-	everSeen  bool
+	sticky    map[string][]byte // sự kiện gần nhất theo loại, gửi lại cho cửa sổ mới mở
 	closeOnce sync.Once
 }
 
-// Start mở máy chủ trên một cổng ngẫu nhiên của 127.0.0.1.
+// Start mở máy chủ trên 127.0.0.1. Cổng cố định được ưu tiên để trình duyệt nhớ quyền dùng micro
+// giữa các lần chạy; nếu cổng bận thì dùng cổng ngẫu nhiên.
 func Start(levels Levels) (*Server, error) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := net.Listen("tcp", "127.0.0.1:47821")
+	if err != nil {
+		ln, err = net.Listen("tcp", "127.0.0.1:0")
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -57,6 +60,7 @@ func Start(levels Levels) (*Server, error) {
 		lines:   make(chan string, 8),
 		closed:  make(chan struct{}),
 		clients: map[chan []byte]struct{}{},
+		sticky:  map[string][]byte{},
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.auth(func(w http.ResponseWriter, _ *http.Request) {
@@ -89,12 +93,24 @@ func (s *Server) Closed() <-chan struct{} { return s.closed }
 // Emit gửi một diễn biến của trợ lý tới giao diện.
 func (s *Server) Emit(e assistant.Event) {
 	b, _ := json.Marshal(e)
-	s.mu.Lock()
 	if e.Type == "status" {
-		s.status = b
+		s.setSticky("status", b)
 	}
-	s.mu.Unlock()
 	s.broadcast(b)
+}
+
+// UseBrowserSpeech bảo giao diện tự nhận giọng nói và đọc câu trả lời bằng tính năng có sẵn của trình duyệt.
+// Dùng khi máy chủ AI chỉ trao đổi bằng chữ.
+func (s *Server) UseBrowserSpeech() {
+	b := []byte(`{"type":"config","speech":"browser"}`)
+	s.setSticky("config", b)
+	s.broadcast(b)
+}
+
+func (s *Server) setSticky(kind string, b []byte) {
+	s.mu.Lock()
+	s.sticky[kind] = b
+	s.mu.Unlock()
 }
 
 // auth chỉ cho qua yêu cầu mang đúng mã bí mật, để trang web khác trên máy không ra lệnh được cho trợ lý.
@@ -145,14 +161,15 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	c := make(chan []byte, 128)
 	s.mu.Lock()
 	s.clients[c] = struct{}{}
-	s.everSeen = true
-	status := s.status
+	replay := [][]byte{s.sticky["config"], s.sticky["status"]}
 	s.mu.Unlock()
 	defer s.dropClient(c)
 
 	write := func(b []byte) { fmt.Fprintf(w, "data: %s\n\n", b); fl.Flush() }
-	if status != nil {
-		write(status)
+	for _, b := range replay {
+		if b != nil {
+			write(b)
+		}
 	}
 	write(fmt.Appendf(nil, `{"type":"muted","muted":%t}`, s.muted.Load()))
 	for {

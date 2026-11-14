@@ -14,6 +14,7 @@ import (
 
 	"github.com/otkhovps-sys/assistant-AI/internal/assistant"
 	"github.com/otkhovps-sys/assistant-AI/internal/audio"
+	"github.com/otkhovps-sys/assistant-AI/internal/chat"
 	"github.com/otkhovps-sys/assistant-AI/internal/tools"
 	"github.com/otkhovps-sys/assistant-AI/internal/ui"
 )
@@ -21,7 +22,8 @@ import (
 func main() {
 	loadDotEnv(".env")
 
-	model := flag.String("model", envOr("GEMINI_MODEL", "gemini-3.8-live"), "model Gemini Live")
+	baseURL := flag.String("base-url", os.Getenv("OPENAI_BASE_URL"), "địa chỉ API tương thích OpenAI (ví dụ https://host/v1); bỏ trống = dùng Gemini Live")
+	model := flag.String("model", "", "tên model (mặc định lấy từ OPENAI_MODEL hoặc GEMINI_MODEL)")
 	voice := flag.String("voice", os.Getenv("GEMINI_VOICE"), "tên giọng đọc (bỏ trống = mặc định)")
 	textOnly := flag.Bool("text", false, "chỉ gõ chữ, không dùng micro và loa")
 	cli := flag.Bool("cli", false, "chạy trong terminal, không mở cửa sổ giao diện")
@@ -29,6 +31,18 @@ func main() {
 	allowPower := flag.Bool("allow-power", false, "cho phép trợ lý tắt máy và khởi động lại")
 	flag.Parse()
 	log.SetFlags(log.Ltime)
+	chatMode := *baseURL != ""
+	if *model == "" {
+		if chatMode {
+			*model = os.Getenv("OPENAI_MODEL")
+		} else {
+			*model = envOr("GEMINI_MODEL", "gemini-3.8-live")
+		}
+	}
+	// Chế độ chat chỉ trao đổi bằng chữ với máy chủ; giọng nói do cửa sổ giao diện lo.
+	if chatMode {
+		*textOnly = true
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
@@ -58,6 +72,9 @@ func main() {
 			log.Fatalf("mở giao diện: %v", err)
 		}
 		cfg.Lines, cfg.Events, cfg.Muted = srv.Lines(), srv.Emit, srv.Muted()
+		if chatMode {
+			srv.UseBrowserSpeech()
+		}
 		fail = func(msg string) {
 			log.Print(msg)
 			srv.Emit(assistant.Event{Type: "status", State: "error", Message: msg})
@@ -81,6 +98,26 @@ func main() {
 			cfg.Audio = a
 			dev.Store(a)
 		}
+	}
+
+	if chatMode {
+		switch {
+		case os.Getenv("OPENAI_API_KEY") == "":
+			fail("Thiếu OPENAI_API_KEY: đặt biến môi trường hoặc ghi vào file .env")
+		case *model == "":
+			fail("Thiếu tên model: đặt OPENAI_MODEL trong file .env hoặc dùng cờ -model")
+		}
+		if *cli {
+			log.Print("gõ lệnh rồi Enter (gõ /quit để thoát)")
+		}
+		err := chat.Run(ctx, chat.Config{
+			BaseURL: *baseURL, APIKey: os.Getenv("OPENAI_API_KEY"), Model: *model,
+			Tools: cfg.Tools, Lines: cfg.Lines, Events: cfg.Events,
+		})
+		if err != nil {
+			fail(err.Error())
+		}
+		return
 	}
 
 	if os.Getenv("GEMINI_API_KEY") == "" && os.Getenv("GOOGLE_API_KEY") == "" {
@@ -136,6 +173,9 @@ func printEvents() func(assistant.Event) {
 			fmt.Print(e.Text)
 		case "turn", "tool":
 			flush()
+		case "error":
+			flush()
+			fmt.Println("Lỗi:", e.Message)
 		}
 	}
 }
