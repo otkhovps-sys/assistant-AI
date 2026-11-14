@@ -14,7 +14,7 @@ func OpenWindow(url string) error {
 	for _, env := range []string{"ProgramFiles(x86)", "ProgramFiles", "LocalAppData"} {
 		edge := filepath.Join(os.Getenv(env), "Microsoft", "Edge", "Application", "msedge.exe")
 		if _, err := os.Stat(edge); err == nil {
-			return exec.Command(edge, "--app="+url, "--window-size=420,700").Start()
+			return exec.Command(edge, "--app="+url, "--window-size=380,620").Start()
 		}
 	}
 	return exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()

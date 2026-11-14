@@ -17,6 +17,7 @@ import (
 	"github.com/otkhovps-sys/assistant-AI/internal/chat"
 	"github.com/otkhovps-sys/assistant-AI/internal/tools"
 	"github.com/otkhovps-sys/assistant-AI/internal/ui"
+	"github.com/otkhovps-sys/assistant-AI/internal/win"
 )
 
 func main() {
@@ -28,6 +29,7 @@ func main() {
 	textOnly := flag.Bool("text", false, "chỉ gõ chữ, không dùng micro và loa")
 	cli := flag.Bool("cli", false, "chạy trong terminal, không mở cửa sổ giao diện")
 	fullDuplex := flag.Bool("full-duplex", false, "giữ micro mở khi trợ lý đang nói để ngắt lời được (nên dùng tai nghe)")
+	noTop := flag.Bool("no-top", false, "không cho cửa sổ nổi trên các ứng dụng khác")
 	allowPower := flag.Bool("allow-power", false, "cho phép trợ lý tắt máy và khởi động lại")
 	flag.Parse()
 	log.SetFlags(log.Ltime)
@@ -47,12 +49,10 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	cfg := assistant.Config{
-		Model:      *model,
-		Voice:      *voice,
-		FullDuplex: *fullDuplex,
-		Tools:      tools.New(tools.Options{AllowPower: *allowPower}),
-	}
+	cfg := assistant.Config{Model: *model, Voice: *voice, FullDuplex: *fullDuplex}
+	// Chụp màn hình chỉ bật ở chế độ chat, nơi ảnh gửi được cho model.
+	toolOpts := tools.Options{AllowPower: *allowPower, Vision: chatMode}
+	var interrupt <-chan struct{}
 
 	// fail báo lỗi khiến app không chạy tiếp được: ra terminal, hoặc lên cửa sổ rồi chờ người dùng đóng.
 	fail := func(msg string) { log.Fatal(msg) }
@@ -75,6 +75,9 @@ func main() {
 		if chatMode {
 			srv.UseBrowserSpeech()
 		}
+		toolOpts.Confirm = srv.Confirm
+		interrupt = srv.Interrupt()
+		srv.OnPin = win.SetTopmost
 		fail = func(msg string) {
 			log.Print(msg)
 			srv.Emit(assistant.Event{Type: "status", State: "error", Message: msg})
@@ -89,6 +92,11 @@ func main() {
 		if err := ui.OpenWindow(srv.URL()); err != nil {
 			log.Printf("không tự mở được cửa sổ (%v); hãy mở địa chỉ trên bằng trình duyệt", err)
 		}
+		// Khi cửa sổ hiện ra: thu nhỏ về góc màn hình và cho nổi trên các ứng dụng khác.
+		go func() {
+			win.Adopt(ui.WindowTitle, 380, 620)
+			srv.SetPinned(!*noTop)
+		}()
 		if !*textOnly {
 			a, err := audio.Open()
 			if err != nil {
@@ -99,6 +107,8 @@ func main() {
 			dev.Store(a)
 		}
 	}
+
+	cfg.Tools = tools.New(toolOpts)
 
 	if chatMode {
 		switch {
@@ -112,7 +122,7 @@ func main() {
 		}
 		err := chat.Run(ctx, chat.Config{
 			BaseURL: *baseURL, APIKey: os.Getenv("OPENAI_API_KEY"), Model: *model,
-			Tools: cfg.Tools, Lines: cfg.Lines, Events: cfg.Events,
+			Tools: cfg.Tools, Lines: cfg.Lines, Events: cfg.Events, Interrupt: interrupt,
 		})
 		if err != nil {
 			fail(err.Error())
@@ -171,7 +181,7 @@ func printEvents() func(assistant.Event) {
 				fmt.Print(map[string]string{"user": "Bạn: ", "ai": "AI: "}[who])
 			}
 			fmt.Print(e.Text)
-		case "turn", "tool":
+		case "say", "turn", "tool":
 			flush()
 		case "error":
 			flush()

@@ -3,8 +3,11 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"image"
+	"image/jpeg"
 	"net/url"
 	"os/exec"
 	"regexp"
@@ -13,17 +16,34 @@ import (
 	"unicode/utf16"
 	"unsafe"
 
+	"github.com/kbinani/screenshot"
+	"golang.org/x/image/draw"
 	"golang.org/x/sys/windows"
 	"google.golang.org/genai"
+
+	"github.com/otkhovps-sys/assistant-AI/internal/win"
 )
 
 var (
 	user32              = windows.NewLazySystemDLL("user32.dll")
 	procSendInput       = user32.NewProc("SendInput")
 	procLockWorkStation = user32.NewProc("LockWorkStation")
+	procSetCursorPos    = user32.NewProc("SetCursorPos")
 )
 
+// hideConsole ngăn cửa sổ terminal nháy lên khi chạy lệnh nền.
+func hideConsole(cmd *exec.Cmd) {
+	cmd.SysProcAttr = &windows.SysProcAttr{HideWindow: true}
+}
+
 const (
+	inputMouse       = 0
+	mouseLeftDown    = 0x0002
+	mouseLeftUp      = 0x0004
+	mouseRightDown   = 0x0008
+	mouseRightUp     = 0x0010
+	mouseWheel       = 0x0800
+	maxShotWidth     = 1280
 	inputKeyboard    = 1
 	keyeventfKeyUp   = 0x0002
 	keyeventfUnicode = 0x0004
@@ -49,6 +69,48 @@ func key(vk, scan uint16, flags uint32) keyInput {
 	in := keyInput{typ: inputKeyboard}
 	in.ki.vk, in.ki.scan, in.ki.flags = vk, scan, flags
 	return in
+}
+
+// mouseInput khớp với cấu trúc INPUT của Win32 khi type = INPUT_MOUSE (cùng kích thước với keyInput).
+type mouseInput struct {
+	typ uint32
+	mi  struct {
+		dx, dy int32
+		data   uint32
+		flags  uint32
+		time   uint32
+		extra  uintptr
+	}
+}
+
+func sendMouse(flags, data uint32) error {
+	in := mouseInput{typ: inputMouse}
+	in.mi.flags, in.mi.data = flags, data
+	n, _, err := procSendInput.Call(1, uintptr(unsafe.Pointer(&in)), unsafe.Sizeof(in))
+	if n != 1 {
+		return fmt.Errorf("SendInput: %w", err)
+	}
+	return nil
+}
+
+// shot ghi nhớ ảnh chụp gần nhất để đổi toạ độ trên ảnh về toạ độ thật trên màn hình.
+var shot struct {
+	scale  float64 // ảnh / thật
+	origin image.Point
+}
+
+// screenPoint đổi toạ độ model đưa ra (theo ảnh chụp gần nhất) sang toạ độ màn hình.
+func screenPoint(a map[string]any) (int, int, error) {
+	x, okx := a["x"].(float64)
+	y, oky := a["y"].(float64)
+	if !okx || !oky || x < 0 || y < 0 {
+		return 0, 0, fmt.Errorf("thiếu toạ độ x, y")
+	}
+	scale := shot.scale
+	if scale == 0 {
+		return 0, 0, fmt.Errorf("hãy gọi screenshot trước để biết toạ độ")
+	}
+	return shot.origin.X + int(x/scale), shot.origin.Y + int(y/scale), nil
 }
 
 func send(inputs []keyInput) error {
@@ -95,8 +157,8 @@ func shellOpen(target string) error {
 
 var processNameRe = regexp.MustCompile(`^[\w.\- ]+$`)
 
-func platformTools(opts Options) []Tool {
-	return []Tool{
+func platformTools(opts Options, reg *Registry) []Tool {
+	list := []Tool{
 		{
 			Decl: &genai.FunctionDeclaration{
 				Name:        "open_app",
@@ -176,7 +238,7 @@ func platformTools(opts Options) []Tool {
 		{
 			Decl: &genai.FunctionDeclaration{
 				Name:        "press_keys",
-				Description: "Nhấn một tổ hợp phím trên cửa sổ đang mở, ví dụ ctrl+s, alt+tab, win+d, alt+f4, f5.",
+				Description: "Nhấn một tổ hợp phím trên ứng dụng đang được chọn, ví dụ ctrl+s, ctrl+l, enter, alt+f4, win+d. Dùng focus_window trước nếu cần chọn đúng ứng dụng.",
 				Parameters:  obj(map[string]*genai.Schema{"combo": strProp("Các phím nối bằng dấu +")}, "combo"),
 			},
 			Run: func(_ context.Context, a map[string]any) (string, error) {
@@ -184,16 +246,18 @@ func platformTools(opts Options) []Tool {
 				if err != nil {
 					return "", err
 				}
+				win.LeaveSelf()
 				return "đã nhấn " + str(a, "combo"), pressCombo(vks)
 			},
 		},
 		{
 			Decl: &genai.FunctionDeclaration{
 				Name:        "type_text",
-				Description: "Gõ một đoạn văn bản vào cửa sổ đang được chọn.",
+				Description: "Gõ một đoạn văn bản vào ứng dụng đang được chọn, tại vị trí con trỏ. Dùng focus_window trước nếu cần chọn đúng ứng dụng.",
 				Parameters:  obj(map[string]*genai.Schema{"text": strProp("Văn bản cần gõ")}, "text"),
 			},
 			Run: func(_ context.Context, a map[string]any) (string, error) {
+				win.LeaveSelf()
 				var in []keyInput
 				for _, u := range utf16.Encode([]rune(str(a, "text"))) {
 					in = append(in, key(0, u, keyeventfUnicode), key(0, u, keyeventfUnicode|keyeventfKeyUp))
@@ -260,4 +324,129 @@ func platformTools(opts Options) []Tool {
 			},
 		},
 	}
+
+	list = append(list,
+		Tool{
+			Decl: &genai.FunctionDeclaration{
+				Name:        "list_windows",
+				Description: "Liệt kê tiêu đề các cửa sổ ứng dụng đang mở.",
+			},
+			Run: func(context.Context, map[string]any) (string, error) {
+				var titles []string
+				for _, w := range win.List() {
+					titles = append(titles, w.Title)
+				}
+				if len(titles) == 0 {
+					return "không có cửa sổ nào đang mở", nil
+				}
+				return strings.Join(titles, "\n"), nil
+			},
+		},
+		Tool{
+			Decl: &genai.FunctionDeclaration{
+				Name:        "focus_window",
+				Description: "Đưa một cửa sổ đang mở lên trước và chọn nó, để các phím bấm và văn bản gõ sau đó đi vào cửa sổ này.",
+				Parameters:  obj(map[string]*genai.Schema{"title": strProp("Một phần tiêu đề cửa sổ, ví dụ Notepad hoặc Chrome")}, "title"),
+			},
+			Run: func(_ context.Context, a map[string]any) (string, error) {
+				t, err := win.Focus(str(a, "title"))
+				if err != nil {
+					return "", err
+				}
+				return "đã chọn cửa sổ: " + t, nil
+			},
+		},
+	)
+	if !opts.Vision {
+		return list
+	}
+	return append(list,
+		Tool{
+			Decl: &genai.FunctionDeclaration{
+				Name:        "screenshot",
+				Description: "Chụp màn hình để xem máy đang hiển thị gì. Ảnh được gửi kèm ngay sau kết quả. Toạ độ cho mouse_click tính theo pixel của ảnh này.",
+			},
+			Run: func(context.Context, map[string]any) (string, error) {
+				restore := win.HideForCapture()
+				bounds := screenshot.GetDisplayBounds(0)
+				img, err := screenshot.CaptureRect(bounds)
+				restore()
+				if err != nil {
+					return "", fmt.Errorf("không chụp được màn hình: %w", err)
+				}
+				scale := min(1, float64(maxShotWidth)/float64(bounds.Dx()))
+				small := image.NewRGBA(image.Rect(0, 0, int(float64(bounds.Dx())*scale), int(float64(bounds.Dy())*scale)))
+				draw.ApproxBiLinear.Scale(small, small.Bounds(), img, img.Bounds(), draw.Src, nil)
+				var buf bytes.Buffer
+				if err := jpeg.Encode(&buf, small, &jpeg.Options{Quality: 70}); err != nil {
+					return "", err
+				}
+				shot.scale, shot.origin = scale, bounds.Min
+				reg.SetImage(buf.Bytes())
+				return fmt.Sprintf("ảnh màn hình %dx%d pixel, gửi kèm bên dưới", small.Bounds().Dx(), small.Bounds().Dy()), nil
+			},
+		},
+		Tool{
+			Decl: &genai.FunctionDeclaration{
+				Name:        "mouse_click",
+				Description: "Bấm chuột tại một điểm trên màn hình. Toạ độ tính theo pixel của ảnh screenshot gần nhất.",
+				Parameters: obj(map[string]*genai.Schema{
+					"x":      {Type: genai.TypeInteger, Description: "Toạ độ ngang trên ảnh"},
+					"y":      {Type: genai.TypeInteger, Description: "Toạ độ dọc trên ảnh"},
+					"button": strProp("Nút chuột, mặc định left", "left", "right"),
+					"double": {Type: genai.TypeBoolean, Description: "true để bấm đúp"},
+				}, "x", "y"),
+			},
+			Run: func(_ context.Context, a map[string]any) (string, error) {
+				x, y, err := screenPoint(a)
+				if err != nil {
+					return "", err
+				}
+				win.Avoid(x, y)
+				if ok, _, e := procSetCursorPos.Call(uintptr(x), uintptr(y)); ok == 0 {
+					return "", fmt.Errorf("SetCursorPos: %w", e)
+				}
+				down, up := uint32(mouseLeftDown), uint32(mouseLeftUp)
+				if str(a, "button") == "right" {
+					down, up = mouseRightDown, mouseRightUp
+				}
+				clicks := 1
+				if d, _ := a["double"].(bool); d {
+					clicks = 2
+				}
+				for i := 0; i < clicks; i++ {
+					if err := sendMouse(down, 0); err != nil {
+						return "", err
+					}
+					if err := sendMouse(up, 0); err != nil {
+						return "", err
+					}
+					time.Sleep(60 * time.Millisecond)
+				}
+				return "đã bấm", nil
+			},
+		},
+		Tool{
+			Decl: &genai.FunctionDeclaration{
+				Name:        "mouse_scroll",
+				Description: "Cuộn chuột tại một điểm trên màn hình. Toạ độ tính theo pixel của ảnh screenshot gần nhất.",
+				Parameters: obj(map[string]*genai.Schema{
+					"x":     {Type: genai.TypeInteger, Description: "Toạ độ ngang trên ảnh"},
+					"y":     {Type: genai.TypeInteger, Description: "Toạ độ dọc trên ảnh"},
+					"lines": {Type: genai.TypeInteger, Description: "Số nấc cuộn: dương là cuộn xuống, âm là cuộn lên"},
+				}, "x", "y", "lines"),
+			},
+			Run: func(_ context.Context, a map[string]any) (string, error) {
+				x, y, err := screenPoint(a)
+				if err != nil {
+					return "", err
+				}
+				win.Avoid(x, y)
+				procSetCursorPos.Call(uintptr(x), uintptr(y))
+				lines, _ := a["lines"].(float64)
+				// Một nấc cuộn là 120 đơn vị; giá trị dương của Windows là cuộn lên nên phải đảo dấu.
+				return "đã cuộn", sendMouse(mouseWheel, uint32(int32(-lines*120)))
+			},
+		},
+	)
 }

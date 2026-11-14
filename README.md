@@ -40,6 +40,8 @@ App mở một cửa sổ nhỏ có hình cầu ở giữa. Nói vào micro, ho�
 - Hình cầu xám: đang kết nối hoặc đã tắt micro (nút micro ở góc dưới trái).
 - Hình cầu đỏ kèm dòng chữ: có lỗi, ví dụ thiếu API key.
 
+Cửa sổ nhỏ này nằm ở góc dưới phải màn hình và luôn nổi trên các ứng dụng khác; nút ghim ở góc trên phải (hoặc cờ `-no-top`) tắt việc đó. Khi trợ lý đang làm một yêu cầu, hình cầu chuyển tím và nút gửi đổi thành nút Dừng.
+
 Cửa sổ là Microsoft Edge ở chế độ app (có sẵn trên Windows 10/11), hiển thị một trang do app phục vụ trên `127.0.0.1`. Nếu máy không có Edge, trang mở bằng trình duyệt mặc định.
 
 | Cờ | Ý nghĩa |
@@ -47,6 +49,7 @@ Cửa sổ là Microsoft Edge ở chế độ app (có sẵn trên Windows 10/11
 | `-cli` | Chạy trong terminal, không mở cửa sổ (gõ `/quit` hoặc Ctrl+C để thoát) |
 | `-text` | Chỉ gõ chữ, không dùng micro và loa |
 | `-full-duplex` | Giữ micro mở khi trợ lý đang nói để ngắt lời được. Nên dùng tai nghe, nếu không trợ lý sẽ nghe lại chính nó |
+| `-no-top` | Không cho cửa sổ nổi trên các ứng dụng khác |
 | `-allow-power` | Cho phép tắt máy và khởi động lại |
 | `-base-url` | Địa chỉ API tương thích OpenAI (hoặc biến `OPENAI_BASE_URL`) |
 | `-model` | Tên model (hoặc biến `OPENAI_MODEL` / `GEMINI_MODEL`, mặc định `gemini-3.8-live`) |
@@ -64,10 +67,23 @@ Cửa sổ là Microsoft Edge ở chế độ app (có sẵn trên Windows 10/11
 | `type_text` | Gõ văn bản vào cửa sổ đang chọn |
 | `close_app` | Đóng ứng dụng theo tên tiến trình |
 | `power` | Khoá màn hình, ngủ, tắt máy, khởi động lại |
+| `list_windows`, `focus_window` | Xem các cửa sổ đang mở, chọn một cửa sổ để thao tác |
+| `wait` | Chờ vài giây cho ứng dụng kịp mở |
+| `run_command` | Chạy một lệnh PowerShell, sau khi bạn xem lệnh và bấm Cho phép trên cửa sổ |
+| `screenshot`, `mouse_click`, `mouse_scroll` | Xem màn hình và dùng chuột (chỉ ở chế độ API tương thích OpenAI, model cần nhìn được ảnh) |
 | `get_time` | Ngày giờ hiện tại |
 | Google Search | Tra cứu thông tin, có sẵn trong Gemini |
 
-Giới hạn an toàn: trợ lý không chạy được lệnh tuỳ ý, không mở được `cmd`, `powershell` và các trình thông dịch tương tự, và chỉ tắt máy khi có cờ `-allow-power`.
+### Yêu cầu nhiều bước
+
+Trợ lý tự làm lần lượt nhiều bước cho một yêu cầu, ví dụ "mở Notepad, gõ danh sách việc hôm nay rồi lưu ra Desktop", tối đa 30 lượt gọi hàm. Nó kiểm tra kết quả bằng ảnh chụp màn hình và dùng `run_command` cho việc không có hàm riêng. Khi chụp màn hình, cửa sổ trợ lý tạm lánh ra ngoài để không che nội dung; phím bấm và chữ gõ luôn đi tới ứng dụng bạn dùng gần nhất chứ không rơi vào cửa sổ trợ lý.
+
+### Giới hạn an toàn
+
+- Mỗi lệnh `run_command` hiện nguyên văn trên cửa sổ và chỉ chạy khi bạn bấm Cho phép; không trả lời trong một phút được tính là từ chối. Ở chế độ `-cli` lệnh luôn bị từ chối.
+- `open_app` không mở được `cmd`, `powershell` và các trình thông dịch tương tự, để không lách qua bước xác nhận.
+- Tắt máy và khởi động lại chỉ chạy khi có cờ `-allow-power`.
+- Bấm chuột, nhấn phím và gõ chữ không hỏi xác nhận. Hãy theo dõi khi giao việc và dùng nút Dừng nếu cần.
 
 ## Cấu trúc
 
@@ -76,6 +92,7 @@ cmd/assistant        điểm vào, đọc cờ và .env
 internal/ui          giao diện hình cầu: máy chủ web cục bộ và trang index.html
 internal/assistant   phiên Gemini Live: gửi âm thanh/chữ, nhận trả lời, gọi hàm, tự kết nối lại
 internal/chat        chế độ API tương thích OpenAI: chat completions, gọi hàm
+internal/win         quản lý cửa sổ Windows: nổi trên cùng, chọn cửa sổ, lánh khi chụp màn hình
 internal/audio       thu micro 16 kHz, phát loa 24 kHz
 internal/tools       các hàm AI được gọi; platform_windows.go chứa phần điều khiển Windows
 ```

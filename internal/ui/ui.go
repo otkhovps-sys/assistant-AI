@@ -2,6 +2,7 @@
 package ui
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	_ "embed"
@@ -21,6 +22,9 @@ import (
 //go:embed index.html
 var indexHTML []byte
 
+// WindowTitle là tiêu đề trang, dùng để tìm cửa sổ của trợ lý trong hệ thống.
+const WindowTitle = "Trợ lý AI"
+
 // Levels đọc độ lớn micro, độ lớn loa và việc loa có đang phát.
 type Levels func() (mic, out float32, speaking bool)
 
@@ -32,6 +36,13 @@ type Server struct {
 	lines  chan string
 	muted  atomic.Bool
 	closed chan struct{}
+	stop   chan struct{}
+	// OnPin được gọi khi người dùng bật/tắt chế độ nổi trên cùng.
+	OnPin func(on bool)
+
+	confirmMu sync.Mutex
+	confirmID int
+	confirms  map[int]chan bool
 
 	mu        sync.Mutex
 	clients   map[chan []byte]struct{}
@@ -54,13 +65,15 @@ func Start(levels Levels) (*Server, error) {
 		return nil, err
 	}
 	s := &Server{
-		token:   hex.EncodeToString(tok),
-		ln:      ln,
-		levels:  levels,
-		lines:   make(chan string, 8),
-		closed:  make(chan struct{}),
-		clients: map[chan []byte]struct{}{},
-		sticky:  map[string][]byte{},
+		token:    hex.EncodeToString(tok),
+		ln:       ln,
+		levels:   levels,
+		lines:    make(chan string, 8),
+		closed:   make(chan struct{}),
+		stop:     make(chan struct{}, 1),
+		confirms: map[int]chan bool{},
+		clients:  map[chan []byte]struct{}{},
+		sticky:   map[string][]byte{},
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.auth(func(w http.ResponseWriter, _ *http.Request) {
@@ -71,6 +84,15 @@ func Start(levels Levels) (*Server, error) {
 	mux.HandleFunc("GET /events", s.auth(s.handleEvents))
 	mux.HandleFunc("POST /send", s.auth(s.handleSend))
 	mux.HandleFunc("POST /mute", s.auth(s.handleMute))
+	mux.HandleFunc("POST /stop", s.auth(func(w http.ResponseWriter, _ *http.Request) {
+		select {
+		case s.stop <- struct{}{}:
+		default:
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	mux.HandleFunc("POST /pin", s.auth(s.handlePin))
+	mux.HandleFunc("POST /confirm", s.auth(s.handleConfirm))
 	go http.Serve(ln, mux)
 	if levels != nil {
 		go s.pumpLevels()
@@ -86,6 +108,36 @@ func (s *Server) Lines() <-chan string { return s.lines }
 
 // Muted là trạng thái tắt micro do người dùng chọn.
 func (s *Server) Muted() *atomic.Bool { return &s.muted }
+
+// Interrupt báo mỗi lần người dùng bấm Dừng.
+func (s *Server) Interrupt() <-chan struct{} { return s.stop }
+
+// Confirm hiện một hộp hỏi trên giao diện và chờ người dùng đồng ý hoặc từ chối.
+// Không trả lời trong một phút, hoặc ctx bị huỷ, được tính là từ chối.
+func (s *Server) Confirm(ctx context.Context, title, detail string) bool {
+	answer := make(chan bool, 1)
+	s.confirmMu.Lock()
+	s.confirmID++
+	id := s.confirmID
+	s.confirms[id] = answer
+	s.confirmMu.Unlock()
+	defer func() {
+		s.confirmMu.Lock()
+		delete(s.confirms, id)
+		s.confirmMu.Unlock()
+		s.broadcast(fmt.Appendf(nil, `{"type":"confirm_done","id":%d}`, id))
+	}()
+
+	b, _ := json.Marshal(map[string]any{"type": "confirm", "id": id, "title": title, "detail": detail})
+	s.broadcast(b)
+	select {
+	case ok := <-answer:
+		return ok
+	case <-ctx.Done():
+	case <-time.After(time.Minute):
+	}
+	return false
+}
 
 // Closed đóng lại khi người dùng đã đóng cửa sổ giao diện.
 func (s *Server) Closed() <-chan struct{} { return s.closed }
@@ -161,7 +213,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	c := make(chan []byte, 128)
 	s.mu.Lock()
 	s.clients[c] = struct{}{}
-	replay := [][]byte{s.sticky["config"], s.sticky["status"]}
+	replay := [][]byte{s.sticky["config"], s.sticky["status"], s.sticky["pin"]}
 	s.mu.Unlock()
 	defer s.dropClient(c)
 
@@ -223,5 +275,46 @@ func (s *Server) handleMute(w http.ResponseWriter, r *http.Request) {
 	}
 	s.muted.Store(body.Muted)
 	s.broadcast(fmt.Appendf(nil, `{"type":"muted","muted":%t}`, body.Muted))
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handlePin(w http.ResponseWriter, r *http.Request) {
+	var body struct{ On bool }
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<10)).Decode(&body); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	s.SetPinned(body.On)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// SetPinned đặt chế độ nổi trên cùng và báo cho giao diện.
+func (s *Server) SetPinned(on bool) {
+	if s.OnPin != nil {
+		s.OnPin(on)
+	}
+	b := fmt.Appendf(nil, `{"type":"pin","on":%t}`, on)
+	s.setSticky("pin", b)
+	s.broadcast(b)
+}
+
+func (s *Server) handleConfirm(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		ID int
+		OK bool
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<10)).Decode(&body); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	s.confirmMu.Lock()
+	answer := s.confirms[body.ID]
+	s.confirmMu.Unlock()
+	if answer != nil {
+		select {
+		case answer <- body.OK:
+		default:
+		}
+	}
 	w.WriteHeader(http.StatusNoContent)
 }

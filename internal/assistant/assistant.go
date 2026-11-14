@@ -43,7 +43,8 @@ type Config struct {
 
 // Event là một diễn biến của phiên, gửi cho giao diện.
 type Event struct {
-	// Type là "status", "text", "turn", "tool" hoặc "error" (lỗi của một câu, app vẫn chạy tiếp).
+	// Type là "status", "text", "say" (hết một đoạn lời, việc vẫn đang làm), "turn" (xong một yêu cầu),
+	// "tool" hoặc "error" (lỗi của một yêu cầu, app vẫn chạy tiếp).
 	Type string `json:"type"`
 	// State (status): "connecting", "ready" hoặc "error".
 	State string `json:"state,omitempty"`
