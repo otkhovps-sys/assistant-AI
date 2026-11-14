@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trợ lý</title>
+<style>
+  :root { --bg:#0b0d12; --fg:#e9ecf3; --dim:#8b93a5; --line:#232836; --panel:#141824; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--fg); overflow: hidden;
+    font: 15px/1.45 "Segoe UI", system-ui, sans-serif;
+    display: flex; flex-direction: column; user-select: none;
+  }
+  #stage { flex: 1; min-height: 0; position: relative; }
+  canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  #status {
+    position: absolute; left: 0; right: 0; bottom: 6px; text-align: center;
+    color: var(--dim); font-size: 13px; letter-spacing: .02em; padding: 0 20px;
+  }
+  #status.error { color: #ff8a8a; }
+  #captions { height: 112px; padding: 4px 24px 0; text-align: center; overflow: hidden;
+    display: flex; flex-direction: column; justify-content: flex-end; gap: 4px; }
+  #you { color: var(--dim); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #ai { max-height: 66px; overflow: hidden; display: flex; flex-direction: column; justify-content: flex-end; }
+  #toast { height: 22px; text-align: center; font-size: 12px; color: var(--dim); opacity: 0; transition: opacity .3s; }
+  #toast.on { opacity: 1; }
+  #toast.fail { color: #ff8a8a; }
+  form { display: flex; gap: 8px; padding: 8px 16px 16px; }
+  input {
+    flex: 1; min-width: 0; background: var(--panel); color: var(--fg); border: 1px solid var(--line);
+    border-radius: 22px; padding: 0 16px; height: 44px; font: inherit; outline: none; user-select: text;
+  }
+  input:focus { border-color: #4a5570; }
+  input::placeholder { color: #5d6577; }
+  button {
+    width: 44px; height: 44px; flex: none; border-radius: 50%; border: 1px solid var(--line);
+    background: var(--panel); color: var(--fg); cursor: pointer; display: grid; place-items: center;
+  }
+  button:hover { border-color: #4a5570; }
+  button:focus-visible, input:focus-visible { outline: 2px solid #7aa2ff; outline-offset: 2px; }
+  #mic[aria-pressed="true"] { background: #3a1a1e; border-color: #7a2f36; color: #ff8a8a; }
+  #mic .off { display: none; }
+  #mic[aria-pressed="true"] .off { display: block; }
+  svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <canvas id="orb" aria-hidden="true"></canvas>
+  <div id="status" role="status">Đang kết nối…</div>
+</div>
+<div id="captions">
+  <div id="you"></div>
+  <div id="ai"><div id="aiText"></div></div>
+</div>
+<div id="toast"></div>
+<form id="form" autocomplete="off">
+  <button type="button" id="mic" aria-pressed="false" aria-label="Tắt micro" title="Tắt/bật micro">
+    <svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/><path class="off" d="M4 4l16 16"/></svg>
+  </button>
+  <input id="text" placeholder="Hoặc gõ lệnh ở đây…" aria-label="Gõ lệnh">
+  <button type="submit" aria-label="Gửi" title="Gửi">
+    <svg viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+  </button>
+</form>
+<script>
+const token = new URLSearchParams(location.search).get('t') || '';
+const $ = id => document.getElementById(id);
+const st = { conn: 'connecting', msg: '', muted: false, speaking: false, mic: 0, out: 0, live: false };
+
+function post(path, body) {
+  return fetch(path + '?t=' + token, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+}
+
+// ---- Sự kiện từ app ----
+let lastWho = '', toastTimer;
+function onEvent(e) {
+  switch (e.type) {
+    case 'level': st.mic = e.mic; st.out = e.out; st.speaking = e.speaking; break;
+    case 'status': st.conn = e.state; st.msg = e.message || ''; break;
+    case 'muted': st.muted = e.muted; $('mic').setAttribute('aria-pressed', e.muted);
+      $('mic').setAttribute('aria-label', e.muted ? 'Bật micro' : 'Tắt micro'); break;
+    case 'text': {
+      const el = e.who === 'user' ? $('you') : $('aiText');
+      if (lastWho !== e.who) { el.textContent = ''; if (e.who === 'user') $('aiText').textContent = ''; }
+      lastWho = e.who;
+      el.textContent += e.text;
+      break;
+    }
+    case 'turn': lastWho = ''; break;
+    case 'tool':
+      $('toast').textContent = (e.ok ? 'Đã chạy: ' : 'Lỗi khi chạy: ') + e.name;
+      $('toast').className = 'on' + (e.ok ? '' : ' fail');
+      clearTimeout(toastTimer); toastTimer = setTimeout(() => $('toast').className = '', 3500);
+      break;
+  }
+}
+function connect() {
+  const es = new EventSource('/events?t=' + token);
+  es.onopen = () => { st.live = true; };
+  es.onmessage = m => onEvent(JSON.parse(m.data));
+  es.onerror = () => { st.live = false; };
+}
+connect();
+
+// ---- Điều khiển ----
+$('mic').onclick = () => post('/mute', { muted: !st.muted });
+$('form').onsubmit = ev => {
+  ev.preventDefault();
+  const v = $('text').value.trim();
+  if (v) { post('/send', { text: v }); $('text').value = ''; }
+};
+
+// ---- Hình cầu ----
+const cv = $('orb'), cx = cv.getContext('2d');
+const calm = matchMedia('(prefers-reduced-motion: reduce)').matches;
+const MODES = {
+  speaking:   { a: [143, 240, 255], b: [91, 108, 255],  label: 'Đang nói' },
+  listening:  { a: [246, 248, 252], b: [150, 164, 190], label: 'Đang nghe' },
+  muted:      { a: [86, 93, 110],   b: [46, 51, 64],    label: 'Đã tắt micro' },
+  connecting: { a: [120, 128, 148], b: [56, 62, 78],    label: 'Đang kết nối…' },
+  error:      { a: [255, 138, 138], b: [120, 44, 52],   label: 'Có lỗi' },
+  closed:     { a: [86, 93, 110],   b: [46, 51, 64],    label: 'App đã thoát. Bạn có thể đóng cửa sổ này.' },
+};
+function mode() {
+  if (!st.live) return 'closed';
+  if (st.conn === 'error') return 'error';
+  if (st.conn !== 'ready') return 'connecting';
+  if (st.speaking) return 'speaking';
+  return st.muted ? 'muted' : 'listening';
+}
+let lvl = 0, col = { a: [...MODES.connecting.a], b: [...MODES.connecting.b] }, shown = '';
+const mix = (from, to, k) => from.forEach((v, i) => from[i] = v + (to[i] - v) * k);
+const rgb = (c, al = 1) => `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${al})`;
+
+function draw(ms) {
+  const t = ms / 1000, dpr = devicePixelRatio || 1;
+  const w = cv.clientWidth, h = cv.clientHeight;
+  if (cv.width !== w * dpr || cv.height !== h * dpr) { cv.width = w * dpr; cv.height = h * dpr; }
+  cx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  cx.clearRect(0, 0, w, h);
+
+  const m = mode(), M = MODES[m];
+  const label = (m === 'error' && st.msg) ? st.msg : (m === 'connecting' && st.msg) ? st.msg : M.label;
+  if (label !== shown) { shown = label; $('status').textContent = label; $('status').className = m === 'error' ? 'error' : ''; }
+
+  // Tiếng nói thường có RMS nhỏ, nên kéo giãn để hình cầu phản ứng rõ.
+  const raw = m === 'speaking' ? st.out : m === 'listening' ? st.mic : 0;
+  const target = Math.min(1, Math.sqrt(raw) * 1.9);
+  lvl += (target - lvl) * (target > lvl ? 0.35 : 0.12);
+  mix(col.a, M.a, 0.08); mix(col.b, M.b, 0.08);
+
+  const R = Math.min(w, h) * 0.24, ox = w / 2, oy = h / 2 - 6;
+  const breathe = calm ? 0 : Math.sin(t * (m === 'connecting' ? 2.4 : 1.1)) * 0.025;
+  const radius = R * (1 + breathe + lvl * (m === 'speaking' ? 0.22 : 0.14));
+  const wob = calm ? 0 : m === 'speaking' ? 0.03 + lvl * 0.16 : m === 'listening' ? 0.012 + lvl * 0.07 : 0.01;
+
+  // Quầng sáng
+  const glow = cx.createRadialGradient(ox, oy, radius * 0.6, ox, oy, radius * 2.1);
+  glow.addColorStop(0, rgb(col.b, 0.28 + lvl * 0.25)); glow.addColorStop(1, rgb(col.b, 0));
+  cx.fillStyle = glow; cx.fillRect(0, 0, w, h);
+
+  // Thân hình cầu, viền gợn theo âm lượng
+  cx.beginPath();
+  for (let i = 0; i <= 120; i++) {
+    const a = i / 120 * Math.PI * 2;
+    const r = radius * (1 + wob * (Math.sin(3 * a + t * 1.7) * 0.5 + Math.sin(5 * a - t * 2.3) * 0.3 + Math.sin(2 * a + t * 0.9) * 0.2));
+    const x = ox + Math.cos(a) * r, y = oy + Math.sin(a) * r;
+    i ? cx.lineTo(x, y) : cx.moveTo(x, y);
+  }
+  cx.closePath();
+  const g = cx.createRadialGradient(ox - radius * 0.35, oy - radius * 0.4, radius * 0.1, ox, oy, radius * 1.15);
+  g.addColorStop(0, rgb(col.a)); g.addColorStop(1, rgb(col.b));
+  cx.fillStyle = g; cx.fill();
+
+  requestAnimationFrame(draw);
+}
+requestAnimationFrame(draw);
+</script>
+</body>
+</html>

@@ -2,14 +2,13 @@
 package assistant
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/genai"
@@ -34,8 +33,33 @@ type Config struct {
 	Tools      *tools.Registry
 	// Audio là nil ở chế độ chỉ gõ chữ.
 	Audio *audio.IO
-	// Input là nơi đọc lệnh gõ từ bàn phím.
-	Input io.Reader
+	// Lines là các lệnh gõ chữ. Kênh đóng lại nghĩa là người dùng muốn thoát.
+	Lines <-chan string
+	// Muted, nếu có, tắt micro khi mang giá trị true.
+	Muted *atomic.Bool
+	// Events nhận diễn biến của phiên để hiển thị.
+	Events func(Event)
+}
+
+// Event là một diễn biến của phiên, gửi cho giao diện.
+type Event struct {
+	// Type là "status", "text", "turn" hoặc "tool".
+	Type string `json:"type"`
+	// State (status): "connecting", "ready" hoặc "error".
+	State   string `json:"state,omitempty"`
+	Message string `json:"message,omitempty"`
+	// Who (text): "user" hoặc "ai".
+	Who  string `json:"who,omitempty"`
+	Text string `json:"text,omitempty"`
+	// Name và OK (tool): hàm vừa chạy và kết quả.
+	Name string `json:"name,omitempty"`
+	OK   bool   `json:"ok,omitempty"`
+}
+
+func (c Config) emit(e Event) {
+	if c.Events != nil {
+		c.Events(e)
+	}
 }
 
 // Run chạy trợ lý cho đến khi ctx bị huỷ, tự kết nối lại khi rớt mạng.
@@ -45,13 +69,11 @@ func Run(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("tạo client Gemini: %w", err)
 	}
 
-	lines := make(chan string)
-	go readLines(cfg.Input, lines)
-
 	backoff := time.Second
 	for {
 		start := time.Now()
-		err := runSession(ctx, client, cfg, lines)
+		cfg.emit(Event{Type: "status", State: "connecting"})
+		err := runSession(ctx, client, cfg)
 		if ctx.Err() != nil || errors.Is(err, errQuit) {
 			return nil
 		}
@@ -77,15 +99,7 @@ var (
 	errConnect = errors.New("không kết nối được")
 )
 
-func readLines(r io.Reader, out chan<- string) {
-	sc := bufio.NewScanner(r)
-	for sc.Scan() {
-		out <- sc.Text()
-	}
-	close(out)
-}
-
-func runSession(ctx context.Context, client *genai.Client, cfg Config, lines <-chan string) error {
+func runSession(ctx context.Context, client *genai.Client, cfg Config) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -110,7 +124,8 @@ func runSession(ctx context.Context, client *genai.Client, cfg Config, lines <-c
 		return fmt.Errorf("%w: %v", errConnect, err)
 	}
 	defer session.Close()
-	log.Printf("đã kết nối %s — nói hoặc gõ lệnh rồi Enter (gõ /quit để thoát)", cfg.Model)
+	log.Printf("đã kết nối %s", cfg.Model)
+	cfg.emit(Event{Type: "status", State: "ready"})
 
 	// Kết nối websocket không cho ghi đồng thời từ nhiều goroutine.
 	var sendMu sync.Mutex
@@ -130,7 +145,7 @@ func runSession(ctx context.Context, client *genai.Client, cfg Config, lines <-c
 					return
 				case pcm := <-cfg.Audio.Mic:
 					// Bán song công: gửi khoảng lặng khi loa đang phát để trợ lý không nghe lại chính nó.
-					if !cfg.FullDuplex && cfg.Audio.Speaking() {
+					if (!cfg.FullDuplex && cfg.Audio.Speaking()) || (cfg.Muted != nil && cfg.Muted.Load()) {
 						clear(pcm)
 					}
 					if err := sendRealtime(genai.LiveRealtimeInput{
@@ -149,7 +164,7 @@ func runSession(ctx context.Context, client *genai.Client, cfg Config, lines <-c
 			select {
 			case <-ctx.Done():
 				return
-			case line, ok := <-lines:
+			case line, ok := <-cfg.Lines:
 				line = strings.TrimSpace(line)
 				if !ok || line == "/quit" {
 					errc <- errQuit
@@ -167,7 +182,6 @@ func runSession(ctx context.Context, client *genai.Client, cfg Config, lines <-c
 	}()
 
 	go func() {
-		var tr transcript
 		for {
 			msg, err := session.Receive()
 			if err != nil {
@@ -178,8 +192,8 @@ func runSession(ctx context.Context, client *genai.Client, cfg Config, lines <-c
 				var resps []*genai.FunctionResponse
 				for _, fc := range tc.FunctionCalls {
 					res := cfg.Tools.Call(ctx, fc.Name, fc.Args)
-					tr.flush()
 					log.Printf("hàm %s(%v) -> %v", fc.Name, fc.Args, res)
+					cfg.emit(Event{Type: "tool", Name: fc.Name, OK: res["error"] == nil})
 					resps = append(resps, &genai.FunctionResponse{ID: fc.ID, Name: fc.Name, Response: res})
 				}
 				sendMu.Lock()
@@ -207,14 +221,14 @@ func runSession(ctx context.Context, client *genai.Client, cfg Config, lines <-c
 					}
 				}
 			}
-			if t := sc.InputTranscription; t != nil {
-				tr.add("Bạn", t.Text)
+			if t := sc.InputTranscription; t != nil && t.Text != "" {
+				cfg.emit(Event{Type: "text", Who: "user", Text: t.Text})
 			}
-			if t := sc.OutputTranscription; t != nil {
-				tr.add("AI", t.Text)
+			if t := sc.OutputTranscription; t != nil && t.Text != "" {
+				cfg.emit(Event{Type: "text", Who: "ai", Text: t.Text})
 			}
 			if sc.TurnComplete {
-				tr.flush()
+				cfg.emit(Event{Type: "turn"})
 			}
 		}
 	}()
@@ -224,27 +238,5 @@ func runSession(ctx context.Context, client *genai.Client, cfg Config, lines <-c
 		return ctx.Err()
 	case err := <-errc:
 		return err
-	}
-}
-
-// transcript in phần chữ của hội thoại, gom các mẩu cùng người nói trên một dòng.
-type transcript struct{ who string }
-
-func (t *transcript) add(who, text string) {
-	if text == "" {
-		return
-	}
-	if t.who != who {
-		t.flush()
-		fmt.Printf("%s: ", who)
-		t.who = who
-	}
-	fmt.Print(text)
-}
-
-func (t *transcript) flush() {
-	if t.who != "" {
-		fmt.Println()
-		t.who = ""
 	}
 }

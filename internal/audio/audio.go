@@ -2,8 +2,11 @@
 package audio
 
 import (
+	"encoding/binary"
 	"fmt"
+	"math"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gen2brain/malgo"
@@ -27,6 +30,28 @@ type IO struct {
 	mu        sync.Mutex
 	out       []byte
 	lastSound time.Time
+
+	// Độ lớn âm thanh gần nhất (RMS 0..1), lưu dạng bit của float32 cho giao diện đọc.
+	micLevel, outLevel atomic.Uint32
+}
+
+// rms tính độ lớn trung bình của một khối PCM 16-bit little-endian.
+func rms(pcm []byte) float32 {
+	n := len(pcm) / 2
+	if n == 0 {
+		return 0
+	}
+	var sum float64
+	for i := 0; i < n; i++ {
+		v := float64(int16(binary.LittleEndian.Uint16(pcm[2*i:]))) / 32768
+		sum += v * v
+	}
+	return float32(math.Sqrt(sum / float64(n)))
+}
+
+// Levels trả về độ lớn micro, độ lớn loa và việc loa có đang phát hay không.
+func (a *IO) Levels() (mic, out float32, speaking bool) {
+	return math.Float32frombits(a.micLevel.Load()), math.Float32frombits(a.outLevel.Load()), a.Speaking()
 }
 
 // Open mở micro và loa mặc định của hệ thống.
@@ -45,6 +70,7 @@ func Open() (*IO, error) {
 		Data: func(_, in []byte, _ uint32) {
 			chunk := make([]byte, len(in))
 			copy(chunk, in)
+			a.micLevel.Store(math.Float32bits(rms(in)))
 			select {
 			case a.Mic <- chunk:
 			default:
@@ -87,6 +113,7 @@ func (a *IO) fill(out []byte) {
 		a.lastSound = time.Now()
 	}
 	a.mu.Unlock()
+	a.outLevel.Store(math.Float32bits(rms(out[:n])))
 	clear(out[n:])
 }
 

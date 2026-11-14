@@ -1,6 +1,6 @@
 # assistant-AI
 
-Trợ lý AI viết bằng Go, điều khiển Windows bằng giọng nói hoặc gõ chữ, dùng Gemini Live API.
+Trợ lý AI viết bằng Go, điều khiển Windows bằng giọng nói hoặc gõ chữ, dùng Gemini Live API. Giao diện là một hình cầu chuyển động theo giọng nói.
 
 App chỉ thu micro và phát loa. Nhận dạng giọng, trả lời, đọc ra tiếng, gọi hàm và tra Google đều do Gemini xử lý qua một kết nối WebSocket.
 
@@ -9,8 +9,10 @@ App chỉ thu micro và phát loa. Nhận dạng giọng, trả lời, đọc ra
 Cần Go 1.24 trở lên và một trình biên dịch C (thư viện âm thanh `malgo` dùng cgo). Trên Windows, cài MinGW-w64, ví dụ qua [MSYS2](https://www.msys2.org/) hoặc `winget install BrechtSanders.WinLibs.POSIX.UCRT`, rồi đảm bảo `gcc` có trong `PATH`.
 
 ```bash
-go build -o assistant.exe ./cmd/assistant
+go build -ldflags "-H=windowsgui" -o assistant.exe ./cmd/assistant
 ```
+
+`-H=windowsgui` ẩn cửa sổ terminal khi mở app. Bỏ cờ này nếu muốn xem log.
 
 Lấy API key tại <https://aistudio.google.com/apikey>, chép `.env.example` thành `.env` và điền `GEMINI_API_KEY`.
 
@@ -20,10 +22,18 @@ Lấy API key tại <https://aistudio.google.com/apikey>, chép `.env.example` t
 ./assistant.exe
 ```
 
-Nói vào micro, hoặc gõ lệnh rồi Enter. Gõ `/quit` hoặc Ctrl+C để thoát.
+App mở một cửa sổ nhỏ có hình cầu ở giữa. Nói vào micro, hoặc gõ lệnh vào ô bên dưới. Đóng cửa sổ là app thoát.
+
+- Hình cầu trắng, gợn nhẹ theo giọng bạn: đang nghe.
+- Hình cầu xanh, gợn theo giọng trợ lý: đang nói.
+- Hình cầu xám: đang kết nối hoặc đã tắt micro (nút micro ở góc dưới trái).
+- Hình cầu đỏ kèm dòng chữ: có lỗi, ví dụ thiếu API key.
+
+Cửa sổ là Microsoft Edge ở chế độ app (có sẵn trên Windows 10/11), hiển thị một trang do app phục vụ trên `127.0.0.1`. Nếu máy không có Edge, trang mở bằng trình duyệt mặc định.
 
 | Cờ | Ý nghĩa |
 |---|---|
+| `-cli` | Chạy trong terminal, không mở cửa sổ (gõ `/quit` hoặc Ctrl+C để thoát) |
 | `-text` | Chỉ gõ chữ, không dùng micro và loa |
 | `-full-duplex` | Giữ micro mở khi trợ lý đang nói để ngắt lời được. Nên dùng tai nghe, nếu không trợ lý sẽ nghe lại chính nó |
 | `-allow-power` | Cho phép tắt máy và khởi động lại |
@@ -51,6 +61,7 @@ Giới hạn an toàn: trợ lý không chạy được lệnh tuỳ ý, không 
 
 ```
 cmd/assistant        điểm vào, đọc cờ và .env
+internal/ui          giao diện hình cầu: máy chủ web cục bộ và trang index.html
 internal/assistant   phiên Gemini Live: gửi âm thanh/chữ, nhận trả lời, gọi hàm, tự kết nối lại
 internal/audio       thu micro 16 kHz, phát loa 24 kHz
 internal/tools       các hàm AI được gọi; platform_windows.go chứa phần điều khiển Windows
